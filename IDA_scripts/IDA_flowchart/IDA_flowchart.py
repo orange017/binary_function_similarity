@@ -31,12 +31,14 @@
 ##############################################################################
 
 import hashlib
+import traceback
+
 import idaapi
 import idautils
 import idc
+import ida_pro
 import os
 import time
-
 from collections import namedtuple
 
 COLUMNS = [
@@ -88,7 +90,8 @@ def get_basic_block_opcodes(bb):
     opc_list = list()
     t_va = bb.va
     while t_va < bb.va + bb.size:
-        opc_list.append(idaapi.ua_mnem(t_va))
+        mnem = idaapi.ua_mnem(t_va)
+        opc_list.append(mnem.encode('utf-8'))
         t_va = idc.next_head(t_va)
     return opc_list
 
@@ -116,7 +119,7 @@ def get_function_hashopcodes(fva):
         opc_list.extend(get_basic_block_opcodes(bb))
 
     # Create a string with the opcodes
-    opc_string = ''.join(opc_list)
+    opc_string = b''.join(opc_list)
     opc_string = opc_string.upper()
 
     # Get the sha256 hash
@@ -172,6 +175,7 @@ def analyze_functions(idb_path, output_csv):
         except Exception as e:
             print("[!] Exception: skipping function fva: %d" % fva)
             print(e)
+            print("Exception traceback: %s" % traceback.format_exc())
 
     print("[D] Processing %d functions took: %d seconds" %
           (c + 1, time.time() - start_time))
@@ -183,15 +187,14 @@ def analyze_functions(idb_path, output_csv):
 if __name__ == "__main__":
     if not idaapi.get_plugin_options("flowchart"):
         print("[!] -Oflowchart option is missing")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     plugin_options = idaapi.get_plugin_options("flowchart").split(':')
     if len(plugin_options) != 2:
         print("[!] -Oflowchart:IDB_PATH:OUTPUT_CSV is required")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     idb_path = plugin_options[0]
     output_csv = plugin_options[1]
-
     analyze_functions(idb_path, output_csv)
-    idc.Exit(0)
+    ida_pro.qexit(0)
