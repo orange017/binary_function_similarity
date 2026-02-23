@@ -56,8 +56,7 @@ def get_size_local_vars(fva):
     Return:
         the size of local variables
     """
-    return idc.GetFrameLvarSize(fva)
-
+    return idc.get_func_attr(fva, idc.FUNCATTR_FRSIZE)
 
 def f_sum(bbs_dict, key_f):
     """
