@@ -19,6 +19,25 @@ The repository is structured in the following way:
 * [Models](Models/): the code for the approaches we tested
 * [Results](Results/): the results of our experiments on all the test cases and the code to extract the different metrics.
 
+## Get Started
+
+* Unpack IDA 7.7 to idapro directory.
+* Launch IDA and apply license.
+* Unpack embedded [python 3.10.0](https://www.python.org/ftp/python/3.10.0/python-3.10.0-embed-amd64.zip) to python directory.
+* Setup enviroment variables:
+```cmd
+set IDA_PATH=%~dp0idapro\idat64.exe
+set IDA_PATH32=%~dp0idapro\idat.exe
+set PATH="%~dp0python-3.10.0";"%~dp0python-3.10.0\Scripts";%PATH%
+```
+* Setup pip:
+```cmd
+curl -sSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+python get-pip.py
+```
+* Uncomment `import site` string in `python310._pth`.
+* Install all requiements
+
 
 ## What to do next?
 The following is a list of the main steps to follow based on the most common use cases:
