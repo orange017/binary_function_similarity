@@ -1,3 +1,5 @@
+#include "catalog1.h"
+
 #define WORD_SIZE 32      	// 32 bits
 #define MAX_WORD 0xffffffff     // Maximum size of a dword.
 #define BYTE_SIZE 8             // Amount of bits in a byte.

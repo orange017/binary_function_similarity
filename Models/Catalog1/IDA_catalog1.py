@@ -33,9 +33,11 @@
 import ida_bytes
 import idaapi
 import idc
+import ida_pro
 import json
 import os
 import time
+import traceback
 
 from catalog1.catalog_fast import sign
 from collections import namedtuple
@@ -75,7 +77,7 @@ def run_catalog1(idb_path, fva_list, sig_size, output_csv):
     # For each function in the list
     for fva in fva_list:
         try:
-            func_binary_data = ""
+            func_binary_data = b""
             for bb in sorted(get_basic_blocks(fva)):
                 bb_data = ida_bytes.get_bytes(bb.va, bb.size)
                 if bb_data:
@@ -103,6 +105,7 @@ def run_catalog1(idb_path, fva_list, sig_size, output_csv):
         except Exception as e:
             print("[!] Exception: skipping function fva: %d" % fva)
             print(e)
+            print(traceback.format_exc())
 
     csv_out.close()
     return
@@ -111,12 +114,12 @@ def run_catalog1(idb_path, fva_list, sig_size, output_csv):
 if __name__ == '__main__':
     if not idaapi.get_plugin_options("catalog1"):
         print("[!] -Ocatalog1 option is missing")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     plugin_options = idaapi.get_plugin_options("catalog1").split(':')
     if len(plugin_options) != 4:
         print("[!] -Ocatalog1:INPUT_JSON:IDB_PATH:SIG_SIZE:OUTPUT_CSV is required")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     input_json = plugin_options[0]
     idb_path = plugin_options[1]
@@ -128,10 +131,10 @@ if __name__ == '__main__':
 
     if idb_path not in selected_functions:
         print("[!] Error! IDB path (%s) not in %s" % (idb_path, input_json))
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     fva_list = selected_functions[idb_path]
     print("[D] Found %d addresses" % len(fva_list))
 
     run_catalog1(idb_path, fva_list, sig_size, output_csv)
-    idc.Exit(0)
+    ida_pro.qexit(0)

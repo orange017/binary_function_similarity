@@ -1,9 +1,21 @@
 # Binding the C library to python:
 import ctypes
 from ctypes import cdll
+import platform
 
-CATALOG1_LIB = 'libcatalog1.so'
-CATALOG1_LIB_PATH = "catalog1/bin/libcatalog1.so"
+os_name = platform.system()
+print(f"Operating System Name: {os_name}")
+
+if os_name == "Windows":
+    CATALOG1_LIB = 'catalog1.dll'
+    CATALOG1_LIB_PATH = "catalog1/bin/catalog1.dll"
+elif os_name == "Linux":
+    CATALOG1_LIB = 'libcatalog1.so'
+    CATALOG1_LIB_PATH = "catalog1/bin/libcatalog1.so"
+else:
+    raise Exception(f"Unsupported operating system: {os_name}")
+
+
 
 
 class Catalog1Sign:

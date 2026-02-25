@@ -67,7 +67,7 @@ signature = sign(binary_data, SIG_SIZE)
 
 # Python3 implementation
 signature_slow = slow_sign(binary_data, SIG_SIZE)
-````
+```
 
 ## Copyright information about Catalog1
 The code of [Catalog1](catalog1) is taken from the xorpd repository of the [fcatalog_server](https://github.com/xorpd/fcatalog_server), which is released under the GNU General Public License v3.0.
@@ -79,3 +79,12 @@ The code of [Catalog1](catalog1) is taken from the xorpd repository of the [fcat
 Changelog wrt the [original version](https://github.com/xorpd/fcatalog_server/tree/master/catalog1):
 
 * The `catalog1/Makefile` has been modified.
+
+Build cmake (Windows):
+
+```cmd
+mkdir build
+cd build
+cmake --build . --config Release
+cmake --install . --config Release
+```
