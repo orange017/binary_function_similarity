@@ -44,9 +44,9 @@ import multiprocessing
 import os
 import pyvex
 import shutil
-import signal
 import time
 import traceback
+import keystone
 
 from collections import Counter
 from collections import defaultdict
@@ -57,10 +57,8 @@ from os.path import exists
 from os.path import isdir
 from os.path import isfile
 from os.path import join
-from pwn import asm
-from pwn import context
-from pwn import u16
 from tqdm import tqdm
+from func_timeout import func_timeout, FunctionTimedOut
 
 log = None
 g_start_time = time.time()
@@ -162,7 +160,7 @@ def process(file_or_dir_path, experiment_dir, target_func_addr,
     for target_dir in target_dirs:
         if not isdir(target_dir):
             if exists(target_dir):
-                print(f'ERROR: {taget_dir} exists, but it is not a directory')
+                print(f'ERROR: {target_dir} exists, but it is not a directory')
                 return 1
             else:
                 os.makedirs(target_dir)
@@ -185,7 +183,9 @@ def process(file_or_dir_path, experiment_dir, target_func_addr,
     results = list()
     log.info(f'[M] Creating workers_num: {g_config["workers_num"]}')
     pool = Pool(processes=g_config['workers_num'],
-                maxtasksperchild=g_config['max_tasks_per_child'])
+                maxtasksperchild=g_config['max_tasks_per_child'],
+                initializer=init_worker,
+                initargs=(g_config, g_start_time))
 
     # Iterate over each JSON file (each JSON corresponds to an IDB)
     for j_idx, j_path in enumerate(j_paths):
@@ -290,8 +290,7 @@ def stats(input_dir, experiment_dir):
     tot_processed_funcs = 0
     tot_elapsed_time_without_errors = 0
     tot_processed_funcs_without_errors = 0
-    for j_idx, j_path in enumerate(output_j_paths):
-        print(j_idx)
+    for j_idx, j_path in tqdm(enumerate(output_j_paths), total=len(output_j_paths)):
         with open(j_path) as f:
             j_data = json.load(f)
 
@@ -345,6 +344,15 @@ def inputstats(input_path):
 
     print(f'Tot funcs: {tot_funcs}')
 
+
+def init_worker(config, start_time):
+    """Initialize worker process with config and start_time globals"""
+    global g_config, g_start_time, g_debug, g_verbose, log
+    g_config = config
+    g_start_time = start_time
+    g_debug = config.get('debug', False)
+    g_verbose = config.get('verbose', False)
+    set_logger(g_debug, config.get('logs_dir', '.'))
 
 def worker_func(j_path, j_idx, j_num):
     assert j_path.endswith('.json')
@@ -482,6 +490,33 @@ def set_logger(debug, outputdir):
 
 
 def log_worker(msg, only_file=False):
+    global log
+    
+    # Lazy initialization of logger if not already initialized
+    if log is None:
+        LOG_NAME = 'zeek'
+        log = logging.getLogger(LOG_NAME)
+        log.handlers = []
+        log.propagate = False
+        
+        logs_dir = g_config.get('logs_dir', '.')
+        if not isdir(logs_dir):
+            os.makedirs(logs_dir)
+        
+        fh = logging.FileHandler(os.path.join(logs_dir, f'{LOG_NAME}.log'))
+        fh.setLevel(logging.DEBUG)
+        
+        fmt = '%(asctime)s %(levelname)s %(message)s'
+        formatter = coloredlogs.ColoredFormatter(fmt)
+        fh.setFormatter(formatter)
+        log.addHandler(fh)
+        
+        if g_debug:
+            loglevel = logging.DEBUG
+        else:
+            loglevel = logging.INFO
+        log.setLevel(loglevel)
+    
     msg = msg.strip('\n')
     try:
         process_id = f'P{multiprocessing.current_process()._identity[0]:02d}'
@@ -536,7 +571,6 @@ class StrandsExtractor():
         self.statements = vex_block.statements
         self.arch = arch
         self.pyvex_arch = arch_to_pyvex_arch_map[arch]
-        self.pwntools_arch = arch_to_pwntools_arch_map[arch]
 
         self.tmp2exp = {}
         self.reg2exp = defaultdict(list)
@@ -831,18 +865,26 @@ class StrandsExtractor():
 
         return exp_tree
 
+    def _hash_exp_tree(self, exp_tree):
+        hash_ = hashlib.md5(str(exp_tree).encode('utf-8'))
+        raw_hash = hash_.hexdigest()
+        shash = (
+            int.from_bytes(hash_.digest()[:2], byteorder='little')
+            & self.HASH_MASK
+        )
+        return shash, raw_hash
+
     def hash_exp_tree(self, exp_tree):
-        signal.alarm(g_config['hash_timeout'])
         try:
-            hash_ = hashlib.md5(str(exp_tree).encode('utf-8'))
-            raw_hash = hash_.hexdigest()
-            shash = u16(hash_.digest()[:2]) & self.HASH_MASK
-            signal.alarm(0)
-        except ZeekTimeoutException:
+            shash, raw_hash = func_timeout(
+                g_config['hash_timeout'],
+                self._hash_exp_tree,
+                args=(exp_tree,)
+            )
+        except FunctionTimedOut:
             raise Exception('timeout when computing strand hash')
         except Exception:
-            signal.alarm(0)
-            raise
+            raise Exception('error while computing strand hash')
         return shash, raw_hash
 
     def reg_offset_to_name(self, offset):
@@ -876,8 +918,11 @@ def process_function(j_path, binary_name, func_addr, func_idx, funcs_num, blocks
         if block_bytes_b64 is not None:
             block_bytes = base64.b64decode(block_bytes_b64)
         else:
-            context.arch = arch_to_pwntools_arch_map[arch]
-            block_bytes = asm('\n'.join(block_info['bb_disasm']))
+            ks_arch, ks_mode = arch_to_keystone_map[arch]
+            ks = keystone.Ks(ks_arch, ks_mode)
+            assembly_code = '\n'.join(block_info['bb_disasm'])
+            encoding, _ = ks.asm(assembly_code)
+            block_bytes = bytes(encoding)
         expected_strands_idxs = block_info.get('expected_strands_idxs', None)
 
         try:
@@ -909,14 +954,15 @@ def extract_block_hash_vals(block_bytes, arch, expected_strands_idxs=None):
     if g_config['debug']:
         log_worker(f'Extracting vex blocks from {len(block_bytes)} bytes')
 
-    signal.alarm(g_config['vex_timeout'])
     try:
-        vex_blocks, blocks_bytes = extract_vex_blocks(block_bytes, arch)
-        signal.alarm(0)
-    except ZeekTimeoutException:
+        vex_blocks, blocks_bytes = func_timeout(
+            g_config['vex_timeout'],
+            extract_vex_blocks,
+            args=(block_bytes, arch)
+        )
+    except FunctionTimedOut:
         raise Exception('timeout when extracting VEX block')
     except Exception:
-        signal.alarm(0)
         raise Exception('error while lifting VEX block')
 
     if g_config['debug']:
@@ -973,19 +1019,6 @@ class CustomExpr():
         self.child_expressions = child_expressions[:]
 
 
-def alarm_handler(signum, frame):
-    if g_config['debug']:
-        log_worker('timeout when extracting VEX block')
-    raise ZeekTimeoutException()
-
-
-signal.signal(signal.SIGALRM, alarm_handler)
-
-
-class ZeekTimeoutException(Exception):
-    pass
-
-
 def op_to_norm_op(op):
     norm_op = op_to_norm_op_map.get(op, None)
     if norm_op is not None:
@@ -1024,22 +1057,20 @@ arch_to_pyvex_arch_map = {
     'mips-64': archinfo.ArchMIPS64(),
 }
 
-
-arch_to_pwntools_arch_map = {
-    'x86': 'i386',
-    'x86-32': 'i386',
-    'x64': 'amd64',
-    'x86-64': 'amd64',
-    'arm32': 'arm',
-    'arm-32': 'arm',
-    'arm64': 'aarch64',
-    'arm-64': 'aarch64',
-    'mips32': 'mips',
-    'mips-32': 'mips',
-    'mips64': 'mips64',
-    'mips-64': 'mips64',
+arch_to_keystone_map = {
+    'x86': (keystone.KS_ARCH_X86, keystone.KS_MODE_32),
+    'x86-32': (keystone.KS_ARCH_X86, keystone.KS_MODE_32),
+    'x64': (keystone.KS_ARCH_X86, keystone.KS_MODE_64),
+    'x86-64': (keystone.KS_ARCH_X86, keystone.KS_MODE_64),
+    'arm32': (keystone.KS_ARCH_ARM, keystone.KS_MODE_ARM),
+    'arm-32': (keystone.KS_ARCH_ARM, keystone.KS_MODE_ARM),
+    'arm64': (keystone.KS_ARCH_ARM64, keystone.KS_MODE_LITTLE_ENDIAN),
+    'arm-64': (keystone.KS_ARCH_ARM64, keystone.KS_MODE_LITTLE_ENDIAN),
+    'mips32': (keystone.KS_ARCH_MIPS, keystone.KS_MODE_MIPS32),
+    'mips-32': (keystone.KS_ARCH_MIPS, keystone.KS_MODE_MIPS32),
+    'mips64': (keystone.KS_ARCH_MIPS, keystone.KS_MODE_MIPS64),
+    'mips-64': (keystone.KS_ARCH_MIPS, keystone.KS_MODE_MIPS64),
 }
-
 
 op_to_norm_op_map = {
     # binop

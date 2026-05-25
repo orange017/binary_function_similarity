@@ -1,7 +1,8 @@
-pwntools==4.7.0
-click==8.0.4
-pyvex==9.1.12332
-ipython==8.1.1
-coloredlogs==15.0.1
-tqdm==4.64.0
-numpy==1.22.3
+pyvex
+keystone-engine
+archinfo
+func-timeout
+coloredlogs
+click
+tqdm
+ipython
