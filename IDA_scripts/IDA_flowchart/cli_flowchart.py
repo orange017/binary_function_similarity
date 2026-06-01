@@ -44,8 +44,9 @@ from os.path import dirname
 from os.path import isfile
 from os.path import join
 from os.path import relpath
+import shutil
 
-IDA_PATH = getenv("IDA_PATH", "/home/user/idapro-7.3/idat64")
+IDA_PATH = getenv("IDA_PATH", shutil.which("idat64") or "idat64")
 IDA_PLUGIN = join(dirname(abspath(__file__)), 'IDA_flowchart.py')
 REPO_PATH = dirname(dirname(dirname(abspath(__file__))))
 LOG_PATH = "flowchart_log.txt"

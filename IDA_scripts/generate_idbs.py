@@ -47,11 +47,11 @@ from os.path import isfile
 from os.path import join
 from os.path import relpath
 from os.path import samefile
-
+import shutil
 
 BIN_FOLDER = join(dirname(dirname(abspath(__file__))), 'Binaries')
 IDB_FOLDER = join(dirname(dirname(abspath(__file__))), 'IDBs')
-IDA_PATH = getenv("IDA_PATH", "/home/user/idapro-7.3/idat64")
+IDA_PATH = getenv("IDA_PATH", shutil.which("idat64") or "idat64")
 LOG_PATH = "generate_idbs_log.txt"
 
 TEST_BINARIES = {
@@ -124,6 +124,9 @@ def directory_walk(input_folder, output_folder):
 
                 input_path = join(root, fname)
                 output_path = join(tmp_out, fname + ".i64")
+                if isfile(output_path):
+                    print("[D] {} already exists".format(output_path))
+                    continue
                 if export_idb(input_path, output_path):
                     export_success += 1
                 else:
