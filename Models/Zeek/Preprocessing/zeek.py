@@ -180,34 +180,45 @@ def process(file_or_dir_path, experiment_dir, target_func_addr,
 
     log.info(f'[M] Found {len(j_paths)} file(s) to process')
 
-    results = list()
+    worker_results = list()
     log.info(f'[M] Creating workers_num: {g_config["workers_num"]}')
     pool = Pool(processes=g_config['workers_num'],
                 maxtasksperchild=g_config['max_tasks_per_child'],
                 initializer=init_worker,
                 initargs=(g_config, g_start_time))
-
-    # Iterate over each JSON file (each JSON corresponds to an IDB)
-    for j_idx, j_path in enumerate(j_paths):
-        if j_idx < start_idx:
-            continue
-        if workers_num == 1:
-            worker_func(j_path, j_idx, len(j_paths))
-        else:
-            res = pool.apply_async(worker_func, args=(
+    try:
+        # Iterate over each JSON file (each JSON corresponds to an IDB)
+        for j_idx, j_path in enumerate(j_paths):
+            if j_idx < g_config['start_idx']:
+                continue
+            r = pool.apply_async(worker_func, args=(
                 j_path, j_idx, len(j_paths)))
-            results.append(res)
+            worker_results.append(r)
 
-    log.info("[M] Waiting processes to finish")
+        # Monitor results using a timeout loop
+        while True:
+            # Check if all tasks are finished
+            if all(r.ready() for r in worker_results):
+                break
+            # Short sleep prevents high CPU usage during monitoring
+            time.sleep(0.1)
 
-    # Close the pool
-    pool.close()
-    pool.join()
+        log.info("[M] Waiting processes to finish")
 
-    # Wait for all the async tasks to finish
-    for res in results:
-        res.get()
-    log.info("[M] All processes finished")
+        # Close the pool
+        pool.close()
+        pool.join()
+
+        # Wait for all the async tasks to finish
+        for r in worker_results:
+            r.get()
+        log.info("[M] All processes finished")
+    except KeyboardInterrupt:
+        log.info("[M] KeyboardInterrupt received, terminating workers")
+        pool.terminate()
+        pool.join()
+        log.info("[M] Workers terminated")
+        return
 
     output_json_path = join(experiment_dir, 'zeek.json')
     log.info(f"[M] Now collecting all results in one single JSON file: {output_json_path}")
@@ -707,11 +718,11 @@ class StrandsExtractor():
         strands_hashes = Counter()
         raw_hashes = []
         while len(candidates) > 0:
-            start_idx = candidates.pop()
+            stmt_idx = candidates.pop()
             if g_debug or g_verbose:
-                print(f'Current strand idx: {start_idx} {self.statements[start_idx]}')
+                print(f'Current strand idx: {stmt_idx} {self.statements[stmt_idx]}')
 
-            strand_idxs, strand_hash, raw_hash = self.extract_strand(start_idx)
+            strand_idxs, strand_hash, raw_hash = self.extract_strand(stmt_idx)
             if g_debug or g_verbose:
                 print(f'STRAND IDXS: {strand_idxs}')
                 print(f'STRAND HASH: {strand_hash}')
@@ -728,43 +739,43 @@ class StrandsExtractor():
             print(f'VEX BLOCK STRANDS HASHES: {strands_hashes}')
         return strands_idxs, strands_hashes, raw_hashes
 
-    def extract_strand(self, start_idx):
+    def extract_strand(self, stmt_idx):
         '''Returns: the list of used '''
 
         self.check_timeout()
 
         self.reset_norm_reg_names()
 
-        stmt = self.statements[start_idx]
+        stmt = self.statements[stmt_idx]
 
         if g_debug:
-            print(f'extract_strand {start_idx} {stmt}')
+            print(f'extract_strand {stmt_idx} {stmt}')
 
         self.curr_strand_idxs = set()
         self.computed_exp_trees = {}
         exp_tree = None
         if stmt.tag == 'Ist_Put':
             exp_tree_l = self.get_norm_reg_name(stmt.offset)
-            exp_tree_r = self.extract_strand_from_exp(stmt.data, start_idx)
+            exp_tree_r = self.extract_strand_from_exp(stmt.data, stmt_idx)
             exp_tree = ('=', (exp_tree_l, exp_tree_r))
         elif stmt.tag == 'Ist_PutI':
-            exp_tree_l = self.extract_strand_from_exp(stmt.ix, start_idx)
-            exp_tree_r = self.extract_strand_from_exp(stmt.data, start_idx)
+            exp_tree_l = self.extract_strand_from_exp(stmt.ix, stmt_idx)
+            exp_tree_r = self.extract_strand_from_exp(stmt.data, stmt_idx)
             exp_tree = ('=', (exp_tree_l, exp_tree_r))
         elif stmt.tag == 'Ist_Store':
-            exp_addr = self.extract_strand_from_exp(stmt.addr, start_idx)
-            exp_data = self.extract_strand_from_exp(stmt.data, start_idx)
+            exp_addr = self.extract_strand_from_exp(stmt.addr, stmt_idx)
+            exp_data = self.extract_strand_from_exp(stmt.data, stmt_idx)
             exp_tree = ('memstore', (exp_addr, exp_data))
         elif stmt.tag == 'Ist_StoreG':
-            exp_guard = self.extract_strand_from_exp(stmt.guard, start_idx)
-            exp_addr = self.extract_strand_from_exp(stmt.addr, start_idx)
-            exp_data = self.extract_strand_from_exp(stmt.data, start_idx)
+            exp_guard = self.extract_strand_from_exp(stmt.guard, stmt_idx)
+            exp_addr = self.extract_strand_from_exp(stmt.addr, stmt_idx)
+            exp_data = self.extract_strand_from_exp(stmt.data, stmt_idx)
             exp_tree = ('guardedmemstore', (exp_guard, exp_addr, exp_data))
         elif stmt.tag == 'Ist_Exit':
             assert stmt.guard is not None
-            exp_tree = self.extract_strand_from_exp(stmt.guard, start_idx)
+            exp_tree = self.extract_strand_from_exp(stmt.guard, stmt_idx)
         else:
-            raise Exception(f'starting stmt {stmt.tag} not supported')
+            raise Exception(f'stmt {stmt.tag} not supported')
 
         assert exp_tree is not None
         assert type(exp_tree) == tuple
