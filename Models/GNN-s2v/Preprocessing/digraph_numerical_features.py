@@ -41,15 +41,20 @@ import json
 import networkx as nx
 import numpy as np
 import os
+import time
 
 from collections import defaultdict
-from multiprocessing import Pool
+import multiprocessing
 from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
 # Number of numerical features
 NUM_ACFG_FEATURES = 8
 
+try:
+    to_numpy_matrix = nx.to_numpy_array
+except AttributeError: # older NetworkX versions
+    to_numpy_matrix = nx.to_numpy_matrix
 
 def create_graph(node_list, edge_list):
     """
@@ -72,7 +77,7 @@ def create_graph(node_list, edge_list):
             G.add_edge(edge[0], edge[1])
 
     node_list = list(G.nodes())
-    adj_mat = nx.to_numpy_matrix(G, nodelist=node_list, dtype=np.int8)
+    adj_mat = to_numpy_matrix(G, nodelist=node_list, dtype=np.int8)
     return adj_mat, G
 
 
@@ -104,58 +109,20 @@ def chunks(ll, n):
             return
         yield x
 
-
-def betweenness_centrality_parallel(G, processes=None):
-    """
-    Parallel betweenness centrality  function
-
-    Source: https://networkx.org/documentation/stable/
-      auto_examples/algorithms/plot_parallel_betweenness.html
-    """
-    bt_sc = []
-    with Pool(processes=processes) as p:
-        node_divisor = len(p._pool) * 4
-        node_chunks = list(
-            chunks(G.nodes(), int(G.order() / node_divisor) + 1))
-        num_chunks = len(node_chunks)
-        bt_sc = p.starmap(
-            nx.betweenness_centrality_subset,
-            zip(
-                [G] * num_chunks,
-                node_chunks,
-                [list(G)] * num_chunks,
-                [True] * num_chunks,
-                [None] * num_chunks,
-            ),
-        )
-
-    # Reduce the partial solutions
-    bt_c = bt_sc[0]
-    for bt in bt_sc[1:]:
-        for n in bt:
-            bt_c[n] += bt[n]
-    return bt_c
-
-
-def create_features_matrix(G, fva_data, num_processes):
+def create_features_matrix(G, fva_data):
     """
     Create the matrix with numerical features.
 
     Args
         G: nx.DiGraph CFG
         fva_data: dict with features associated to a function
-        num_processes: number of parallel processes
 
     Return
         np.array: Numpy matrix with numerical features
     """
     f_mat = list()
 
-    if G.order() > 200:
-        betweenness = betweenness_centrality_parallel(
-            G, min(int(G.order() / 100), num_processes))
-    else:
-        betweenness = nx.betweenness_centrality(G)
+    betweenness = nx.betweenness_centrality(G)
 
     # Iterate over each BBs
     for node_idx, node_va in enumerate(list(G.nodes())):
@@ -222,6 +189,26 @@ def np_to_scipy_sparse(np_mat):
     mat_str = "::".join([row_str, col_str, data_str, n_row, n_col])
     return mat_str
 
+def create_functions_dict_single(input_path):
+    print(f"[D] Processing [{os.getpid()}]: {input_path}")
+    functions_dict = defaultdict(dict)
+    with open(input_path) as f_in:
+        jj = json.load(f_in)
+        idb_path = list(jj.keys())[0]
+        j_data = jj[idb_path]
+        # Iterate over each function
+        for fva in j_data:
+            fva_data = j_data[fva]
+            g_mat, G = create_graph(
+                fva_data['nodes'], fva_data['edges'])
+            f_mat = create_features_matrix(G, fva_data)
+            graph_str = np_to_scipy_sparse(g_mat)
+            features_str = np_to_str(f_mat)
+            functions_dict[idb_path][fva] = {
+                'adj_mat': graph_str,
+                'features_mat': features_str
+            }
+    return functions_dict
 
 def create_functions_dict(input_folder, num_processes):
     """
@@ -235,33 +222,29 @@ def create_functions_dict(input_folder, num_processes):
     try:
         functions_dict = defaultdict(dict)
 
+        workers = list()
+        pool = multiprocessing.Pool(processes=num_processes)
+
         for f_json in tqdm(os.listdir(input_folder)):
             if not f_json.endswith(".json"):
                 continue
-
             f_path = os.path.join(input_folder, f_json)
-            with open(f_path) as f_in:
-                jj = json.load(f_in)
+            r = pool.apply_async(
+                create_functions_dict_single, args=(f_path,))
+            workers.append(r)
 
-                idb_path = list(jj.keys())[0]
-                print("[D] Processing: {}".format(idb_path))
-                j_data = jj[idb_path]
+            while workers:
+                pending = []
+                for r in workers:
+                    if r.ready():
+                        functions_dict.update(r.get())
+                    else:
+                        pending.append(r)
+                    workers = pending
+                    time.sleep(0.1)
 
-                # Iterate over each function
-                for fva in j_data:
-                    fva_data = j_data[fva]
-
-                    g_mat, G = create_graph(
-                        fva_data['nodes'], fva_data['edges'])
-                    f_mat = create_features_matrix(G, fva_data, num_processes)
-
-                    graph_str = np_to_scipy_sparse(g_mat)
-                    features_str = np_to_str(f_mat)
-
-                    functions_dict[idb_path][fva] = {
-                        'adj_mat': graph_str,
-                        'features_mat': features_str
-                    }
+        pool.close()
+        pool.join()
 
         return functions_dict
     except Exception as e:
@@ -273,14 +256,14 @@ def create_functions_dict(input_folder, num_processes):
 @click.option('-i', '--input-dir', required=True,
               help='IDA_acfg_features JSON files.')
 @click.option('-p', '--num-processes',
-              default=20,
+              default=multiprocessing.cpu_count(),
               help='Maximum number of processes.')
 @click.option('-o', '--output-dir', required=True,
               help='Output directory.')
 def main(input_dir, output_dir, num_processes):
     # Create output directory if it doesn't exist
     if not os.path.isdir(output_dir):
-        os.mkdir(output_dir)
+        os.makedirs(output_dir)
 
     o_dict = create_functions_dict(input_dir, num_processes)
     output_path = os.path.join(output_dir,
