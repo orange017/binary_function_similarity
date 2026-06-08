@@ -1,35 +1,12 @@
-from collections import Counter, defaultdict
+from collections import defaultdict
 import hashlib
-import base64
-import time
-from func_timeout import func_timeout, FunctionTimedOut
-import archinfo
-import logging
 
-def build_logger():
-    logger = logging.getLogger("StrandsExtractor")
-    logger.setLevel(logging.DEBUG)
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-    return logger
-
-g_logger = build_logger()
 
 class StrandHash:
 
     def __init__(self, exp_tree):
         self.HASH_MASK = ((1 << 10) - 1)
         self.raw_hash = hashlib.md5(str(exp_tree).encode('utf-8'))
-
-    def _calculate_hash(self, exp, hash):
-        for exp in self.exp_tree:
-            if type(exp) == tuple:
-                self._calculate_hash(exp, hash)
-            else:
-                hash.update(str(exp).encode('utf-8'))
 
     def hexdigest(self):
         return self.raw_hash.hexdigest()
@@ -45,39 +22,31 @@ class StrandsExtractor():
     strands, where
     """
     
-    def __init__(self, vex_block, arch, max_bock_timeout=60):
-        self.vex_block = vex_block
+    def __init__(self, vex_block):
         self.statements = vex_block.statements
-        self.arch = arch
-        self.pyvex_arch = arch_to_pyvex_arch_map[arch]
+        self.pyvex_arch = vex_block.arch
         self.tmp2exp = {}
         self.reg2exp = defaultdict(list)
-        self.norm_reg_names = {}
-        self.next_norm_reg_name_idx = 1
-        self.HASH_MASK = ((1 << 10) - 1)
-        self.start_time = time.time()
-        self.max_block_timeout = max_bock_timeout
+        self.normalized_register_names = {}
 
-    def reset_norm_reg_names(self):
+    def reset_normalized_register_names(self):
         """
         Reset the normalized register names mapping and index. This should be called at the 
         beginning of the extraction of each strand, to ensure that the same register offset 
         gets the same normalized name across different strands, but different strands can 
         have different normalized names for the same register offset.
         """
-        self.next_norm_reg_name_idx = 1
-        self.norm_reg_names = {}
+        self.normalized_register_names.clear()
 
-    def get_norm_reg_name(self, reg):
+    def get_normalized_register_name(self, reg):
         """
         Returns a normalized name for the given register offset. The same offset will always 
         get the same normalized name.
         """
-        norm = self.norm_reg_names.get(reg, None)
+        norm = self.normalized_register_names.get(reg, None)
         if norm is None:
-            norm = f't{self.next_norm_reg_name_idx}'
-            self.next_norm_reg_name_idx += 1
-            self.norm_reg_names[reg] = norm
+            reg_name_idx = len(self.normalized_register_names) + 1
+            self.normalized_register_names[reg] = f't{reg_name_idx}'
         return norm
 
     def extract_strands(self):
@@ -93,7 +62,7 @@ class StrandsExtractor():
             reg_offset : [ (IRExpr, stmt_idx), (IRExpr, stmt_idx), ... ]
           }
         """
-        candidates = self.collect_target_statement_idxs()
+        candidates = self.collect_candidate_statement_idxs()
         stmt_idx_to_exp_tree = {}
         while len(candidates) > 0:
             stmt_idx = candidates.pop()
@@ -104,18 +73,13 @@ class StrandsExtractor():
 
     def extract_strand(self, stmt_idx):
         '''Returns: the list of used '''
-
-
-        self.reset_norm_reg_names()
+        self.reset_normalized_register_names()
         stmt = self.statements[stmt_idx]
-
-        # g_logger.debug(f"Extracting strand from stmt idx {stmt_idx}: {stmt}")
-
         self.curr_strand_idxs = set()
         self.computed_exp_trees = {}
         exp_tree = None
         if stmt.tag == 'Ist_Put':
-            exp_tree_l = self.get_norm_reg_name(stmt.offset)
+            exp_tree_l = self.get_normalized_register_name(stmt.offset)
             exp_tree_r = self.extract_strand_from_exp(stmt.data, stmt_idx)
             exp_tree = ('=', (exp_tree_l, exp_tree_r))
         elif stmt.tag == 'Ist_PutI':
@@ -136,19 +100,14 @@ class StrandsExtractor():
             exp_tree = self.extract_strand_from_exp(stmt.guard, stmt_idx)
         else:
             raise Exception(f'starting stmt {stmt.tag} not supported')
-
         assert exp_tree is not None
         assert type(exp_tree) == tuple
-
         return exp_tree
 
     def extract_strand_from_exp(self, exp, stmt_idx):
         self.curr_strand_idxs.add(stmt_idx)
-        # g_logger.debug(f"Extracting strand from exp {exp} at stmt idx {stmt_idx}")
-
         if (exp, stmt_idx) in self.computed_exp_trees.keys():
             return self.computed_exp_trees[(exp, stmt_idx)]
-
         exp_tree = None
         if type(exp) == str:
             exp_tree = exp
@@ -163,7 +122,7 @@ class StrandsExtractor():
                         put_exp, put_exp_idx)
                     break
             else:
-                exp_tree = self.get_norm_reg_name(exp.offset)
+                exp_tree = self.get_normalized_register_name(exp.offset)
         elif exp.tag == 'Iex_Binop':
             norm_op = op_to_norm_op(exp.op)
             if norm_op is None:
@@ -220,32 +179,8 @@ class StrandsExtractor():
         else:
             raise Exception(f'exp {exp.tag} not supported')
         assert exp_tree is not None
-
         self.computed_exp_trees[(exp, stmt_idx)] = exp_tree
         return exp_tree
-
-    def _hash_exp_tree(self, exp_tree):
-        hash_ = hashlib.md5(str(exp_tree).encode('utf-8'))
-        raw_hash = hash_.hexdigest()
-        shash = (
-            int.from_bytes(hash_.digest()[:2], byteorder='little')
-            & self.HASH_MASK
-        )
-        return shash, raw_hash
-
-    def hash_exp_tree(self, exp_tree):
-        try:
-            hash_block_timeout = self.max_block_timeout - (time.time() - self.start_time) # remaining time before the whole block times out
-            shash, raw_hash = func_timeout(
-                hash_block_timeout,
-                self._hash_exp_tree,
-                args=(exp_tree,)
-            )
-        except FunctionTimedOut:
-            raise Exception('timeout when computing strand hash')
-        except Exception:
-            raise Exception('error while computing strand hash')
-        return shash, raw_hash
 
     def reg_offset_to_name(self, offset):
         return self.pyvex_arch.translate_register_name(offset)
@@ -258,7 +193,7 @@ class StrandsExtractor():
             return True
         return False
 
-    def collect_target_statement_idxs(self):
+    def collect_candidate_statement_idxs(self):
         candidates = set()
         for stmt_idx, stmt in enumerate(self.statements):
             # print(f"Processing stmt idx {stmt_idx} with tag {stmt.tag}")
@@ -319,21 +254,6 @@ class CustomExpr():
         self.op = op
         self.child_expressions = child_expressions[:]
 
-
-arch_to_pyvex_arch_map = {
-    'x86': archinfo.ArchX86(),
-    'x86-32': archinfo.ArchX86(),
-    'x64': archinfo.ArchAMD64(),
-    'x86-64': archinfo.ArchAMD64(),
-    'arm32': archinfo.ArchARM(),
-    'arm-32': archinfo.ArchARM(),
-    'arm64': archinfo.ArchAArch64(),
-    'arm-64': archinfo.ArchAArch64(),
-    'mips32': archinfo.ArchMIPS32(),
-    'mips-32': archinfo.ArchMIPS32(),
-    'mips64': archinfo.ArchMIPS64(),
-    'mips-64': archinfo.ArchMIPS64(),
-}
 
 op_to_norm_op_map = {
     # binop

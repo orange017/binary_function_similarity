@@ -38,6 +38,11 @@ import coloredlogs
 import logging
 import os
 
+import warnings
+warnings.filterwarnings("error", category=FutureWarning)
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+
 from core import ZeekModel
 from core import dump_config_to_json
 from core import get_config
