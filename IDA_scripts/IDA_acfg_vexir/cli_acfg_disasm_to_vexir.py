@@ -1,6 +1,6 @@
 import click
 from tqdm import tqdm
-import os, sys
+import os
 import json
 import base64
 from collections import Counter
@@ -69,7 +69,6 @@ def acfg_disasm2vexir(j_data):
                         print(f"    {insn}")
                     continue
                 for irsb in irsbs:
-                    print(irsb.arch, type(irsb.arch))
                     se = StrandsExtractor(irsb)
                     stmt_idx_to_exp_tree = se.extract_strands()
                     for stmt, exp_tree in stmt_idx_to_exp_tree.items():
@@ -79,7 +78,7 @@ def acfg_disasm2vexir(j_data):
                     j_data[idb_path][fva]["basic_blocks"][bva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(bb_hash_to_freq.items())])
                 func_hash_to_freq.update(bb_hash_to_freq)
             j_data[idb_path][fva]["shash"] = "".join([f"{val}:{freq}" for val, freq in sorted(func_hash_to_freq.items())])
-    sys.exit(0)
+    # sys.exit(0)
     return j_data
 
 

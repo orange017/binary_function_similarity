@@ -43,11 +43,12 @@ class StrandsExtractor():
         Returns a normalized name for the given register offset. The same offset will always 
         get the same normalized name.
         """
-        norm = self.normalized_register_names.get(reg, None)
-        if norm is None:
+        norm_reg_name = self.normalized_register_names.get(reg, None)
+        if norm_reg_name is None:
             reg_name_idx = len(self.normalized_register_names) + 1
-            self.normalized_register_names[reg] = f't{reg_name_idx}'
-        return norm
+            norm_reg_name = f't{reg_name_idx}'
+            self.normalized_register_names[reg] = norm_reg_name
+        return norm_reg_name
 
     def extract_strands(self):
         """
