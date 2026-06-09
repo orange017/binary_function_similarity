@@ -68,29 +68,37 @@ def acfg_disasm2vexir(j_data):
                     for insn in bb_data["bb_disasm"]:
                         print(f"    {insn}")
                     continue
+                j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"] = list()
+                j_data[idb_path][fva]["basic_blocks"][bva]["stmts"] = list()
                 for irsb in irsbs:
+                    for stmt in irsb.statements:
+                        j_data[idb_path][fva]["basic_blocks"][bva]["stmts"].append(str(stmt))
                     se = StrandsExtractor(irsb)
                     stmt_idx_to_exp_tree = se.extract_strands()
+                    j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"].extend([ str(exp_tree) for stmt, exp_tree in sorted(stmt_idx_to_exp_tree.items()) ])
+                    stmt_idx_to_exp_tree.update(stmt_idx_to_exp_tree)
                     for stmt, exp_tree in stmt_idx_to_exp_tree.items():
                         h = StrandHash(exp_tree)
                         bb_hash_to_freq.update((h.shash(),))
-                    # j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"] = stmt_idx_to_exp_tree
-                    j_data[idb_path][fva]["basic_blocks"][bva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(bb_hash_to_freq.items())])
+                j_data[idb_path][fva]["basic_blocks"][bva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(bb_hash_to_freq.items())])
                 func_hash_to_freq.update(bb_hash_to_freq)
             j_data[idb_path][fva]["shash"] = "".join([f"{val}:{freq}" for val, freq in sorted(func_hash_to_freq.items())])
     # sys.exit(0)
     return j_data
 
 
-def acfg_disasm2vexir_wrap(in_path: str, out_path: str):
+def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
     with open(in_path, "r") as fp:
         j_in = json.load(fp)
     j_out = acfg_disasm2vexir(j_in)
     with open(out_path, "w") as fp:
-        json.dump(j_out, fp)
+        if pretty:
+            json.dump(j_out, fp, indent=4)
+        else:
+            json.dump(j_out, fp)
 
 
-def process(input_dir: str, output_dir: str, num_workers: int):
+def process(input_dir: str, output_dir: str, num_processes: int):
     if not os.path.isdir(input_dir):
         print("[M] Error: input dir not exists")
         return
@@ -98,7 +106,7 @@ def process(input_dir: str, output_dir: str, num_workers: int):
         os.makedirs(output_dir)
 
     workers = set()
-    pool = Pool(processes=num_workers)
+    pool = Pool(processes=num_processes)
 
     try:
         for j_file in os.listdir(input_dir):
@@ -137,17 +145,23 @@ def process(input_dir: str, output_dir: str, num_workers: int):
 
 
 @click.command()
-@click.option("-i", "--input-dir", required=True, help='IDA_acfg_disasm JSON dir.')
-@click.option("-o", "--output-dir", required=True, help='Output directory.', default=".")
-@click.option("-n", "--num-workers", required=True, help='Number of workers.', type=int, default=1)
-def main(input_dir: str, output_dir: str, num_workers: int):
-    for root, _, filename in os.walk(input_dir):
-        if os.path.basename(root).startswith("acfg_disasm"):
-            rel_path = os.path.relpath(root, input_dir)
-            acfg_input_dir = os.path.join(input_dir, rel_path)
-            acfg_output_dir = os.path.join(output_dir, rel_path)
-            os.makedirs(acfg_output_dir, exist_ok=True)
-            process(acfg_input_dir, acfg_output_dir, num_workers)
+@click.option("-i", "--input-path", required=True, help='IDA_acfg_disasm JSON dir or file.')
+@click.option("-o", "--output-path", required=True, help='Output directory.', default=".")
+@click.option("-p", "--num-processes", required=True, help='Number of workers.', type=int, default=1)
+def main(input_path: str, output_path: str, num_processes: int):
+    assert os.path.exists and os.path.isdir(output_path)
+    if os.path.isfile(input_path):
+        filename = os.path.basename(input_path)
+        output_file_path = os.path.join(output_path, filename.replace("_acfg_disasm.json", "_acfg_vexir.json"))
+        acfg_disasm2vexir_wrap(input_path, output_file_path, pretty=True)
+    else:
+        for root, _, filename in os.walk(input_path):
+            if os.path.basename(root).startswith("acfg_disasm"):
+                rel_path = os.path.relpath(root, input_path)
+                acfg_input_dir = os.path.join(input_path, rel_path)
+                acfg_output_dir = os.path.join(output_path, rel_path)
+                os.makedirs(acfg_output_dir, exist_ok=True)
+                process(acfg_input_dir, acfg_output_dir, num_processes)
 
 
 if __name__ == "__main__":
