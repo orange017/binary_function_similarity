@@ -6,7 +6,7 @@ import base64
 from collections import Counter
 from multiprocessing import Pool
 import time
-
+from pathlib import Path
 from strand_extractor import StrandsExtractor, StrandHash
 import archinfo
 import pyvex
@@ -60,6 +60,8 @@ def acfg_disasm2vexir(j_data):
         for fva, func_data in tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
             func_hash_to_freq = Counter()
             for bva, bb_data in func_data["basic_blocks"].items():
+                if not j_data[idb_path][fva]["basic_blocks"][bva].get("exp_tree", None):
+                    continue # already processed
                 bb_hash_to_freq = Counter()
                 bb_bytes = base64.b64decode(bb_data["b64_bytes"])
                 irsbs = extract_irsbs_with_timeout(bb_bytes, arch)
@@ -82,20 +84,53 @@ def acfg_disasm2vexir(j_data):
                         bb_hash_to_freq.update((h.shash(),))
                 j_data[idb_path][fva]["basic_blocks"][bva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(bb_hash_to_freq.items())])
                 func_hash_to_freq.update(bb_hash_to_freq)
-            j_data[idb_path][fva]["shash"] = "".join([f"{val}:{freq}" for val, freq in sorted(func_hash_to_freq.items())])
-    # sys.exit(0)
+            j_data[idb_path][fva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(func_hash_to_freq.items())])
+        j_data[idb_path]["arch"] = arch
     return j_data
 
+def acfg_disasm2vexir_stat(j_data):
+    for idb_path, idb_data in j_data.items():
+        # arch = idb_data.pop("arch")
+        total, success = 0, 0
+        for fva, func_data in tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
+            for bva, bb_data in func_data["basic_blocks"].items():
+                total += 1
+                if not j_data[idb_path][fva]["basic_blocks"][bva].get("exp_tree", None):
+                    success += 1
+        print(f"{idb_path} [{success}/{total}]")
+
+def extract_build_info(file_path: str):
+    filename = os.path.basename(file_path)
+    slist = filename.split("_")
+    lib = slist[1]
+    arch, comp, ver, opt = slist[0].split("-")
+    bit = "32" if "32" in arch.replace("86", "32") else "64"
+    arch = arch.replace("32", "").replace("64", "").replace("86", "")
+    return { "lib": lib, "arch": arch, "bit": bit, "comp": comp, "ver": ver, "opt": opt }
 
 def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
+    filters = [
+        { "comp": "gcc", "ver": "9", "opt": "O0"}
+    ]
+    info = extract_build_info(in_path)
+    if filters:
+        for filter in filters:
+            if all([ info[k] == v for k, v in filter.items()]):
+                print(in_path)
+                break
+        else:
+            # print("Skip:", in_path)
+            return
+
     with open(in_path, "r") as fp:
         j_in = json.load(fp)
     j_out = acfg_disasm2vexir(j_in)
-    with open(out_path, "w") as fp:
-        if pretty:
-            json.dump(j_out, fp, indent=4)
-        else:
-            json.dump(j_out, fp)
+    if j_out:
+        with open(out_path, "w") as fp:
+            if pretty:
+                json.dump(j_out, fp, indent=4)
+            else:
+                json.dump(j_out, fp)
 
 
 def process(input_dir: str, output_dir: str, num_processes: int):
@@ -143,6 +178,15 @@ def process(input_dir: str, output_dir: str, num_processes: int):
         print("[M] Workers terminated")
         return
 
+def stats(input_dir):
+    for j_file in os.listdir(input_dir):
+        if not j_file.endswith(".json"):
+            continue
+        j_path = os.path.join(input_dir, j_file)
+        with open(j_path, "r") as fp:
+            j_data = json.load(fp)
+            acfg_disasm2vexir_stat(j_data)
+
 
 @click.command()
 @click.option("-i", "--input-path", required=True, help='IDA_acfg_disasm JSON dir or file.')
@@ -161,7 +205,8 @@ def main(input_path: str, output_path: str, num_processes: int):
                 acfg_input_dir = os.path.join(input_path, rel_path)
                 acfg_output_dir = os.path.join(output_path, rel_path)
                 os.makedirs(acfg_output_dir, exist_ok=True)
-                process(acfg_input_dir, acfg_output_dir, num_processes)
+                # process(acfg_input_dir, acfg_output_dir, num_processes)
+                stats(acfg_output_dir)
 
 
 if __name__ == "__main__":
