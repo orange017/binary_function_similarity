@@ -1,17 +1,36 @@
 import os
 import click
 import json
+import base64
+
+from strand_extractor import StrandHash
+from collections import Counter
 
 def compare(jvexir_data, jzeek_data):
+    total, success = 0, 0
     for idb, idb_data in jzeek_data.items():
         for fva, zeek_shash in idb_data["hashes"].items():
-            print(fva)
-            vexir_shash = jvexir_data[idb][fva]["shash"]
-            if vexir_shash != zeek_shash:
-                print(f"Warning: {idb} {fva}")
-                print("VEXIR:", vexir_shash)
-                print("ZEEK: ", zeek_shash)
-    
+            print(f"Process function at {fva}")
+            func_data = jvexir_data[idb][fva]
+            hash_to_freq = Counter()
+            for bva, bb_data in func_data["basic_blocks"].items():
+                bb_bytes = base64.b64decode(bb_data["b64_bytes"])
+                exp_tree = func_data["basic_blocks"][bva]["exp_tree"]
+                print(len(exp_tree), len(bb_bytes))
+                for e in exp_tree:
+                    # print(e)
+                    h = StrandHash(exp_tree)
+                    hash_to_freq.update((h.shash(),))
+            vexir_shash = ";".join([f"{val}:{freq}" for val, freq in sorted(hash_to_freq.items())])
+            total += 1
+            if vexir_shash == zeek_shash:
+                success += 1
+            else:
+                # print(len(vexir_shash), len(zeek_shash))
+                pass
+                #print(vexir_shash)
+                #print(zeek_shash)
+    print(f"[{success}/{total}]")    
 
 @click.command()
 @click.option("-z", "--zeek-dir", required=True, help=' Zeek preprocessing output dir.')

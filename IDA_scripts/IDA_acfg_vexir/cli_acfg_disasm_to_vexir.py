@@ -10,7 +10,7 @@ from pathlib import Path
 from strand_extractor import StrandsExtractor, StrandHash
 import archinfo
 import pyvex
-from func_timeout import func_timeout, FunctionTimedOut
+import sys
 
 
 arch_to_pyvex_arch_map = {
@@ -28,77 +28,6 @@ arch_to_pyvex_arch_map = {
     'mips-64': archinfo.ArchMIPS64(),
 }
 
-
-def extract_irsbs(bytes_, arch, opt_level=2, start_addr=0x400000):
-    off = 0
-    addr = start_addr
-    irsbs = []
-    while off < len(bytes_):
-        irsb = pyvex.lift(
-            bytes_[off:], addr, arch_to_pyvex_arch_map[arch], opt_level=opt_level)
-        irsbs.append(irsb)
-        addr += irsb.size
-        off += irsb.size
-    return irsbs
-
-
-def extract_irsbs_with_timeout(bytes_, arch, opt_level=2, start_addr=0x400000, timeout=20):
-    try:
-        irsbs = func_timeout(
-            timeout,
-            extract_irsbs,
-            args=(bytes_, arch, opt_level, start_addr)
-        )
-    except FunctionTimedOut:
-        irsbs = []
-    return irsbs
-
-
-def acfg_disasm2vexir(j_data):
-    for idb_path, idb_data in j_data.items():
-        arch = idb_data.pop("arch")
-        for fva, func_data in tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
-            func_hash_to_freq = Counter()
-            for bva, bb_data in func_data["basic_blocks"].items():
-                if not j_data[idb_path][fva]["basic_blocks"][bva].get("exp_tree", None):
-                    continue # already processed
-                bb_hash_to_freq = Counter()
-                bb_bytes = base64.b64decode(bb_data["b64_bytes"])
-                irsbs = extract_irsbs_with_timeout(bb_bytes, arch)
-                if len(irsbs) == 0:
-                    print(f"[M] Warning: failed to lift to IR for {idb_path} {fva} {bva}")
-                    for insn in bb_data["bb_disasm"]:
-                        print(f"    {insn}")
-                    continue
-                j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"] = list()
-                j_data[idb_path][fva]["basic_blocks"][bva]["stmts"] = list()
-                for irsb in irsbs:
-                    for stmt in irsb.statements:
-                        j_data[idb_path][fva]["basic_blocks"][bva]["stmts"].append(str(stmt))
-                    se = StrandsExtractor(irsb)
-                    stmt_idx_to_exp_tree = se.extract_strands()
-                    j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"].extend([ str(exp_tree) for stmt, exp_tree in sorted(stmt_idx_to_exp_tree.items()) ])
-                    stmt_idx_to_exp_tree.update(stmt_idx_to_exp_tree)
-                    for stmt, exp_tree in stmt_idx_to_exp_tree.items():
-                        h = StrandHash(exp_tree)
-                        bb_hash_to_freq.update((h.shash(),))
-                j_data[idb_path][fva]["basic_blocks"][bva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(bb_hash_to_freq.items())])
-                func_hash_to_freq.update(bb_hash_to_freq)
-            j_data[idb_path][fva]["shash"] = ";".join([f"{val}:{freq}" for val, freq in sorted(func_hash_to_freq.items())])
-        j_data[idb_path]["arch"] = arch
-    return j_data
-
-def acfg_disasm2vexir_stat(j_data):
-    for idb_path, idb_data in j_data.items():
-        # arch = idb_data.pop("arch")
-        total, success = 0, 0
-        for fva, func_data in tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
-            for bva, bb_data in func_data["basic_blocks"].items():
-                total += 1
-                if not j_data[idb_path][fva]["basic_blocks"][bva].get("exp_tree", None):
-                    success += 1
-        print(f"{idb_path} [{success}/{total}]")
-
 def extract_build_info(file_path: str):
     filename = os.path.basename(file_path)
     slist = filename.split("_")
@@ -108,9 +37,61 @@ def extract_build_info(file_path: str):
     arch = arch.replace("32", "").replace("64", "").replace("86", "")
     return { "lib": lib, "arch": arch, "bit": bit, "comp": comp, "ver": ver, "opt": opt }
 
+
+def convert_filename_to_arch(file_path):
+    info = extract_build_info(file_path)
+    arch, bitness = info["arch"], info["bit"]
+    return f"{arch}-{bitness}"
+
+
+def extract_irsbs(bytes_, arch, opt_level=2, start_addr=0x400000):
+    off = 0
+    addr = start_addr
+    irsbs = []
+    while off < len(bytes_):
+        irsb = pyvex.lift(
+            bytes_[off:], addr, arch_to_pyvex_arch_map[arch], opt_level=opt_level)
+        if irsb.size <= 0:
+            remaining = len(bytes_) - off
+            print(f"Failed at offset {off}. Remaining bytes: {remaining}")
+            break
+        irsbs.append(irsb)
+        addr += irsb.size
+        off += irsb.size
+    return irsbs
+
+
+def acfg_disasm2vexir(j_data):
+    try:
+        for idb_path, idb_data in j_data.items():
+            arch = idb_data.pop("arch", convert_filename_to_arch(idb_path))
+            for fva, func_data in  tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
+                for bva, bb_data in func_data["basic_blocks"].items():
+                    bb_bytes = base64.b64decode(bb_data["b64_bytes"])
+                    exp_tree = j_data[idb_path][fva]["basic_blocks"][bva].pop("exp_tree", [])
+                    if not exp_tree:
+                        irsbs = extract_irsbs(bb_bytes, arch)
+                        if len(irsbs) == 0:
+                            print(f"[M] Warning: failed to lift to IR for {idb_path} {fva} {bva}")
+                            for insn in bb_data["bb_disasm"]:
+                                print(f"    {insn}")
+                        for irsb in irsbs:
+                            se = StrandsExtractor(irsb)
+                            stmt_idx_to_exp_tree = se.extract_strands()
+                            for exp in stmt_idx_to_exp_tree.values():
+                                exp_tree.append(exp)
+                    j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"] = exp_tree
+            j_data[idb_path]["arch"] = arch
+    except Exception as e:
+        print(e)
+        import traceback
+        traceback.print_exc()
+        return None
+    return j_data
+
+
 def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
     filters = [
-        { "comp": "gcc", "ver": "9", "opt": "O0"}
     ]
     info = extract_build_info(in_path)
     if filters:
@@ -119,7 +100,7 @@ def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
                 print(in_path)
                 break
         else:
-            # print("Skip:", in_path)
+            print("Skip:", in_path)
             return
 
     with open(in_path, "r") as fp:
@@ -132,8 +113,7 @@ def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
             else:
                 json.dump(j_out, fp)
 
-
-def process(input_dir: str, output_dir: str, num_processes: int):
+def process(input_dir: str, output_dir: str, num_processes: int, overwrite: bool = False):
     if not os.path.isdir(input_dir):
         print("[M] Error: input dir not exists")
         return
@@ -144,16 +124,19 @@ def process(input_dir: str, output_dir: str, num_processes: int):
     pool = Pool(processes=num_processes)
 
     try:
-        for j_file in os.listdir(input_dir):
+        for j_file in tqdm(os.listdir(input_dir)):
             if not j_file.endswith(".json"):
                 continue
             j_path = os.path.join(input_dir, j_file)
             out_path = os.path.join(output_dir, j_file.replace("_acfg_disasm.json", "_acfg_vexir.json"))
-            if os.path.exists(out_path):
+            if not overwrite and os.path.exists(out_path):
                 print(f"[M] Warning: output file already exists, skip {out_path}")
                 continue
-            r = pool.apply_async(acfg_disasm2vexir_wrap, args=(j_path, out_path,))
-            workers.add(r)
+            if num_processes == 1:
+                acfg_disasm2vexir_wrap(j_path, out_path)
+            else:
+                r = pool.apply_async(acfg_disasm2vexir_wrap, args=(j_path, out_path,))
+                workers.add(r)
 
         # Monitor results using a timeout loop
         while True:
@@ -176,23 +159,17 @@ def process(input_dir: str, output_dir: str, num_processes: int):
         pool.terminate()
         pool.join()
         print("[M] Workers terminated")
-        return
+        sys.exit(0)
 
-def stats(input_dir):
-    for j_file in os.listdir(input_dir):
-        if not j_file.endswith(".json"):
-            continue
-        j_path = os.path.join(input_dir, j_file)
-        with open(j_path, "r") as fp:
-            j_data = json.load(fp)
-            acfg_disasm2vexir_stat(j_data)
-
+def fix(input_dir: str, num_processes: int):
+    process(input_dir, input_dir, num_processes, overwrite=True)
 
 @click.command()
 @click.option("-i", "--input-path", required=True, help='IDA_acfg_disasm JSON dir or file.')
 @click.option("-o", "--output-path", required=True, help='Output directory.', default=".")
 @click.option("-p", "--num-processes", required=True, help='Number of workers.', type=int, default=1)
-def main(input_path: str, output_path: str, num_processes: int):
+@click.option("-m", "--mode", required=True, help='Mode of work.', type=click.Choice(["process", "fix"]), default="process")
+def main(input_path: str, output_path: str, num_processes: int, mode: str):
     assert os.path.exists and os.path.isdir(output_path)
     if os.path.isfile(input_path):
         filename = os.path.basename(input_path)
@@ -205,8 +182,10 @@ def main(input_path: str, output_path: str, num_processes: int):
                 acfg_input_dir = os.path.join(input_path, rel_path)
                 acfg_output_dir = os.path.join(output_path, rel_path)
                 os.makedirs(acfg_output_dir, exist_ok=True)
-                # process(acfg_input_dir, acfg_output_dir, num_processes)
-                stats(acfg_output_dir)
+                if mode == "process":
+                    process(acfg_input_dir, acfg_output_dir, num_processes)
+                elif mode == "fix":
+                    fix(acfg_output_dir, num_processes)
 
 
 if __name__ == "__main__":
