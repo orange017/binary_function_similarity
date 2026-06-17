@@ -11,6 +11,8 @@ from strand_extractor import StrandsExtractor, StrandHash
 import archinfo
 import pyvex
 import sys
+import traceback
+
 
 
 arch_to_pyvex_arch_map = {
@@ -68,8 +70,9 @@ def acfg_disasm2vexir(j_data):
             for fva, func_data in  tqdm(idb_data.items(), desc=f"Processing {idb_path}"):
                 for bva, bb_data in func_data["basic_blocks"].items():
                     bb_bytes = base64.b64decode(bb_data["b64_bytes"])
-                    exp_tree = j_data[idb_path][fva]["basic_blocks"][bva].pop("exp_tree", [])
-                    if not exp_tree:
+                    expr_trees = j_data[idb_path][fva]["basic_blocks"][bva].pop("expr_trees", None)
+                    if not expr_trees:
+                        expr_trees = list()
                         irsbs = extract_irsbs(bb_bytes, arch)
                         if len(irsbs) == 0:
                             print(f"[M] Warning: failed to lift to IR for {idb_path} {fva} {bva}")
@@ -78,40 +81,44 @@ def acfg_disasm2vexir(j_data):
                         for irsb in irsbs:
                             se = StrandsExtractor(irsb)
                             stmt_idx_to_exp_tree = se.extract_strands()
-                            for exp in stmt_idx_to_exp_tree.values():
-                                exp_tree.append(exp)
-                    j_data[idb_path][fva]["basic_blocks"][bva]["exp_tree"] = exp_tree
+                            for tree in stmt_idx_to_exp_tree.values():
+                                expr_trees.append(str(tree))
+                    j_data[idb_path][fva]["basic_blocks"][bva]["expr_trees"] = expr_trees
             j_data[idb_path]["arch"] = arch
     except Exception as e:
         print(e)
-        import traceback
         traceback.print_exc()
         return None
     return j_data
 
 
 def acfg_disasm2vexir_wrap(in_path: str, out_path: str, pretty: bool = False):
-    filters = [
-    ]
-    info = extract_build_info(in_path)
-    if filters:
-        for filter in filters:
-            if all([ info[k] == v for k, v in filter.items()]):
-                print(in_path)
-                break
-        else:
-            print("Skip:", in_path)
-            return
-
-    with open(in_path, "r") as fp:
-        j_in = json.load(fp)
-    j_out = acfg_disasm2vexir(j_in)
-    if j_out:
-        with open(out_path, "w") as fp:
-            if pretty:
-                json.dump(j_out, fp, indent=4)
+    try:
+        filters = [
+        ]
+        info = extract_build_info(in_path)
+        if filters:
+            for filter in filters:
+                if all([ info[k] == v for k, v in filter.items()]):
+                    print(in_path)
+                    break
             else:
-                json.dump(j_out, fp)
+                print("Skip:", in_path)
+                return
+
+        with open(in_path, "r") as fp:
+            j_in = json.load(fp)
+        j_out = acfg_disasm2vexir(j_in)
+        if j_out:
+            with open(out_path, "w") as fp:
+                if pretty:
+                    json.dump(j_out, fp, indent=4)
+                else:
+                    json.dump(j_out, fp)
+    except Exception as e:
+        print(e)
+        traceback.print_exc()
+        return None
 
 def process(input_dir: str, output_dir: str, num_processes: int, overwrite: bool = False):
     if not os.path.isdir(input_dir):
@@ -121,7 +128,7 @@ def process(input_dir: str, output_dir: str, num_processes: int, overwrite: bool
         os.makedirs(output_dir)
 
     workers = set()
-    pool = Pool(processes=num_processes)
+    pool = Pool(processes=num_processes, maxtasksperchild=10)
 
     try:
         for j_file in tqdm(os.listdir(input_dir)):
@@ -170,6 +177,7 @@ def fix(input_dir: str, num_processes: int):
 @click.option("-p", "--num-processes", required=True, help='Number of workers.', type=int, default=1)
 @click.option("-m", "--mode", required=True, help='Mode of work.', type=click.Choice(["process", "fix"]), default="process")
 def main(input_path: str, output_path: str, num_processes: int, mode: str):
+    os.makedirs(output_path, exist_ok=True)
     assert os.path.exists and os.path.isdir(output_path)
     if os.path.isfile(input_path):
         filename = os.path.basename(input_path)

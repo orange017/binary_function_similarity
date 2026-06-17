@@ -117,7 +117,7 @@ class StrandsExtractor():
             def_exp, def_exp_idx = self.tmp2exp[tmp]
             exp_tree = self.extract_strand_from_exp(def_exp, def_exp_idx)
         elif exp.tag == 'Iex_Get':
-            for put_exp, put_exp_idx in self.reg2exp[exp.offset][::-1]:
+            for put_exp, put_exp_idx in reversed(self.reg2exp[exp.offset]):
                 if put_exp_idx < stmt_idx:
                     exp_tree = self.extract_strand_from_exp(
                         put_exp, put_exp_idx)
@@ -234,15 +234,16 @@ class StrandsExtractor():
                 raise Exception(f'stmt {stmt.tag} not supported')
         return candidates
 
-def op_to_norm_op(op):
+def op_to_norm_op(op, only_known_ops: bool = False):
     norm_op = op_to_norm_op_map.get(op, None)
     if norm_op is not None:
         return norm_op
     for op_prefix, op_norm in op_prefixes_to_norm_op_map.items():
         if op.startswith(op_prefix):
             return op_norm
-    return op
-
+    if only_known_ops:
+        return op
+    return None
 
 class CustomExpr():
     """
